@@ -1,0 +1,3 @@
+ip,device_type,description
+192.0.2.10,cisco_ios,Example switch
+192.0.2.11,cisco_ios,Example router
