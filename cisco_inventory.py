@@ -187,8 +187,11 @@ class CiscoInventoryApp:
         return devices
 
     def _collect_device(self, device: dict[str, str], config_dir: Path) -> dict[str, Any]:
-        result: dict[str, Any] = {"summary": {"IP": device["ip"], "Hostname": "", "Status": "Failed"},
-                                  "device_info": [], "inventory": [], "interfaces": [], "arp": [], "mac": [], "cdp": [], "lldp": []}
+        result: dict[str, Any] = {
+            "summary": {"IP": device["ip"], "Hostname": "", "Status": "Failed"},
+            "device_info": [], "inventory": [], "switch_inventory": [], "router_inventory": [],
+            "interfaces": [], "arp": [], "mac": [], "cdp": [], "lldp": []
+        }
         connection = None
         try:
             connection = ConnectHandler(device_type=device["device_type"], ip=device["ip"], username=device["username"],
@@ -197,14 +200,44 @@ class CiscoInventoryApp:
             connection.enable()
             hostname = connection.find_prompt().rstrip("#>").strip()
             result["summary"]["Hostname"] = hostname
-            if self.options["device_info"].get():
+            version = ""
+            model = ""
+            ios_version = ""
+            serial = ""
+            uptime = ""
+
+            if self.options["device_info"].get() or self.options["inventory"].get():
                 version = connection.send_command("show version")
                 model = self._extract_model(version)
-                ios_version = self._match(r"Version\\s+([^\\s,]+)", version)
-                result["device_info"].append({"Hostname": hostname, "Device_IP": device["ip"],
-                    "Model": model, "Serial": self._match(r"Processor board ID\\s+(\\S+)", version),
-                    "IOS_Version": ios_version, "Uptime": self._match(r"uptime is\\s+(.+)", version)})
-                result["switch_inventory"] = [{"IP": device["ip"], "MODEL": model, "OS FIRMWARE": ios_version}]
+                ios_version = self._match(r"Version\s+([^\s,]+)", version)
+                serial = self._extract_serial(version)
+                uptime = self._match(r"uptime is\s+(.+)", version)
+
+            if self.options["device_info"].get():
+                result["device_info"].append({
+                    "Hostname": hostname, "Device_IP": device["ip"],
+                    "Model": model, "Serial": serial,
+                    "IOS_Version": ios_version, "Uptime": uptime
+                })
+
+            if self.options["inventory"].get():
+                device_type = self._detect_device_type(version, model)
+                inventory_row = {
+                    "IP": device["ip"],
+                    "MODEL": model,
+                    "OS FIRMWARE": ios_version,
+                    "Hostname": hostname,
+                    "Serial Number": serial,
+                    "Uptime": uptime,
+                    "Management IP": device["ip"],
+                    "Device Type": device_type,
+                }
+                result["inventory"].append(inventory_row)
+                if device_type == "Switch":
+                    result["switch_inventory"].append(inventory_row)
+                elif device_type == "Router":
+                    result["router_inventory"].append(inventory_row)
+
             if self.options["interfaces"].get():
                 result["interfaces"] = self._interfaces(connection, hostname, device["ip"])
             for key, command, parser in (("arp", "show ip arp", self._arp), ("mac", "show mac address-table dynamic", self._mac)):
@@ -232,17 +265,52 @@ class CiscoInventoryApp:
 
     @staticmethod
     def _extract_model(version: str) -> str:
-        """Extract the Cisco hardware model from common `show version` formats."""
+        """Extract the Cisco hardware model from common show version formats."""
         patterns = (
-            r"cisco\\s+(\\S+)\\s+\\(",
-            r"Model Number\\s*[: ]\\s*(\\S+)",
-            r"Model number\\s*[: ]\\s*(\\S+)",
+            r"cisco\s+(\S+)\s+\(",
+            r"Model Number\s*[: ]\s*(\S+)",
+            r"Model number\s*[: ]\s*(\S+)",
+            r"PID:\s*(\S+)",
         )
         for pattern in patterns:
             model = CiscoInventoryApp._match(pattern, version)
             if model:
                 return model
         return ""
+
+    @staticmethod
+    def _extract_serial(version: str) -> str:
+        """Extract a chassis/board serial from common Cisco show version formats."""
+        patterns = (
+            r"System Serial Number\s*[: ]\s*(\S+)",
+            r"Processor board ID\s+(\S+)",
+            r"Processor board ID\s*[: ]\s*(\S+)",
+        )
+        for pattern in patterns:
+            serial = CiscoInventoryApp._match(pattern, version)
+            if serial:
+                return serial
+        return ""
+
+    @staticmethod
+    def _detect_device_type(version: str, model: str) -> str:
+        """Classify common Cisco platforms as Switch or Router."""
+        text = f"{model} {version}".lower()
+        if "switch ports model" in text:
+            return "Switch"
+        switch_markers = (
+            "ws-c", "catalyst 2", "catalyst 3", "catalyst 4", "catalyst 5",
+            "catalyst 6", "catalyst 9", "nexus", "n3k", "n5k", "n7k", "n9k",
+        )
+        if any(marker in text for marker in switch_markers):
+            return "Switch"
+        router_markers = (
+            "isr", "asr", "cisco 18", "cisco 19", "cisco 28", "cisco 29",
+            "cisco 38", "cisco 39", "cisco 43", "cisco 44", "cisco 45",
+        )
+        if any(marker in text for marker in router_markers):
+            return "Router"
+        return "Cisco Device"
 
     def _interfaces(self, connection: Any, hostname: str, ip: str) -> list[dict[str, str]]:
         descriptions = {parts[0]: parts[3].strip() if len(parts) > 3 else "" for line in connection.send_command("show interfaces description").splitlines()[1:] if (parts := line.split(None, 3))}
@@ -298,10 +366,26 @@ class CiscoInventoryApp:
         report = output_dir / f"cisco_inventory_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
         with pd.ExcelWriter(report, engine="openpyxl") as writer:
             pd.DataFrame([item["summary"] for item in results]).to_excel(writer, sheet_name="Summary", index=False)
+            inventory_rows = [row for item in results for row in item["inventory"]]
+            inventory_columns = [
+                "IP", "MODEL", "OS FIRMWARE", "Hostname",
+                "Serial Number", "Uptime", "Management IP", "Device Type"
+            ]
+            if inventory_rows:
+                pd.DataFrame(inventory_rows, columns=inventory_columns).to_excel(
+                    writer, sheet_name="Inventory", index=False
+                )
+
             switch_rows = [row for item in results for row in item["switch_inventory"]]
             if switch_rows:
-                pd.DataFrame(switch_rows, columns=["IP", "MODEL", "OS FIRMWARE"]).to_excel(
-                    writer, sheet_name="Switch_Inventory", index=False
+                pd.DataFrame(switch_rows, columns=inventory_columns).to_excel(
+                    writer, sheet_name="Switches", index=False
+                )
+
+            router_rows = [row for item in results for row in item["router_inventory"]]
+            if router_rows:
+                pd.DataFrame(router_rows, columns=inventory_columns).to_excel(
+                    writer, sheet_name="Routers", index=False
                 )
             for key, sheet in (("device_info", "Device_Info"), ("interfaces", "Interfaces"), ("arp", "ARP_Table"), ("mac", "MAC_Table"), ("cdp", "CDP_Neighbors"), ("lldp", "LLDP_Neighbors")):
                 rows = [row for item in results for row in item[key]]
