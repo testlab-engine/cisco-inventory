@@ -187,7 +187,7 @@ class CiscoInventoryApp:
 
     def _collect_device(self, device: dict[str, str], config_dir: Path) -> dict[str, Any]:
         result: dict[str, Any] = {"summary": {"IP": device["ip"], "Hostname": "", "Status": "Failed"},
-                                  "device_info": [], "interfaces": [], "arp": [], "mac": [], "cdp": [], "lldp": []}
+                                  "device_info": [], "switch_inventory": [], "interfaces": [], "arp": [], "mac": [], "cdp": [], "lldp": []}
         connection = None
         try:
             connection = ConnectHandler(device_type=device["device_type"], ip=device["ip"], username=device["username"],
@@ -198,9 +198,12 @@ class CiscoInventoryApp:
             result["summary"]["Hostname"] = hostname
             if self.options["device_info"].get():
                 version = connection.send_command("show version")
+                model = self._extract_model(version)
+                ios_version = self._match(r"Version\\s+([^\\s,]+)", version)
                 result["device_info"].append({"Hostname": hostname, "Device_IP": device["ip"],
-                    "Model": self._match(r"cisco\\s+(\\S+)\\s+\\(", version), "Serial": self._match(r"Processor board ID\\s+(\\S+)", version),
-                    "IOS_Version": self._match(r"Version\\s+([^\\s,]+)", version), "Uptime": self._match(r"uptime is\\s+(.+)", version)})
+                    "Model": model, "Serial": self._match(r"Processor board ID\\s+(\\S+)", version),
+                    "IOS_Version": ios_version, "Uptime": self._match(r"uptime is\\s+(.+)", version)})
+                result["switch_inventory"] = [{"IP": device["ip"], "MODEL": model, "OS FIRMWARE": ios_version}]
             if self.options["interfaces"].get():
                 result["interfaces"] = self._interfaces(connection, hostname, device["ip"])
             for key, command, parser in (("arp", "show ip arp", self._arp), ("mac", "show mac address-table dynamic", self._mac)):
@@ -225,6 +228,20 @@ class CiscoInventoryApp:
     def _match(pattern: str, value: str) -> str:
         match = re.search(pattern, value, re.I | re.M)
         return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _extract_model(version: str) -> str:
+        """Extract the Cisco hardware model from common `show version` formats."""
+        patterns = (
+            r"cisco\\s+(\\S+)\\s+\\(",
+            r"Model Number\\s*[: ]\\s*(\\S+)",
+            r"Model number\\s*[: ]\\s*(\\S+)",
+        )
+        for pattern in patterns:
+            model = CiscoInventoryApp._match(pattern, version)
+            if model:
+                return model
+        return ""
 
     def _interfaces(self, connection: Any, hostname: str, ip: str) -> list[dict[str, str]]:
         descriptions = {parts[0]: parts[3].strip() if len(parts) > 3 else "" for line in connection.send_command("show interfaces description").splitlines()[1:] if (parts := line.split(None, 3))}
@@ -280,6 +297,11 @@ class CiscoInventoryApp:
         report = output_dir / f"cisco_inventory_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
         with pd.ExcelWriter(report, engine="openpyxl") as writer:
             pd.DataFrame([item["summary"] for item in results]).to_excel(writer, sheet_name="Summary", index=False)
+            switch_rows = [row for item in results for row in item["switch_inventory"]]
+            if switch_rows:
+                pd.DataFrame(switch_rows, columns=["IP", "MODEL", "OS FIRMWARE"]).to_excel(
+                    writer, sheet_name="Switch_Inventory", index=False
+                )
             for key, sheet in (("device_info", "Device_Info"), ("interfaces", "Interfaces"), ("arp", "ARP_Table"), ("mac", "MAC_Table"), ("cdp", "CDP_Neighbors"), ("lldp", "LLDP_Neighbors")):
                 rows = [row for item in results for row in item[key]]
                 if rows:
