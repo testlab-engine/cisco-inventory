@@ -32,6 +32,7 @@ class CiscoInventoryApp:
         self.use_csv_credentials = tk.BooleanVar(value=False)
         self.options = {
             "device_info": tk.BooleanVar(value=True),
+            "inventory": tk.BooleanVar(value=False),
             "interfaces": tk.BooleanVar(value=True),
             "arp": tk.BooleanVar(value=True),
             "mac": tk.BooleanVar(value=True),
@@ -70,7 +71,7 @@ class CiscoInventoryApp:
         options = ttk.LabelFrame(self.root, text="Data to collect", padding=8)
         options.pack(fill="x", padx=15, pady=4)
         labels = {
-            "device_info": "Device information", "interfaces": "Interfaces", "arp": "ARP table",
+            "device_info": "Device information", "inventory": "Device inventory", "interfaces": "Interfaces", "arp": "ARP table",
             "mac": "MAC address table", "cdp": "CDP neighbors", "lldp": "LLDP neighbors",
             "startup": "Save startup configurations", "only_up": "Only interfaces that are up",
         }
@@ -187,7 +188,7 @@ class CiscoInventoryApp:
 
     def _collect_device(self, device: dict[str, str], config_dir: Path) -> dict[str, Any]:
         result: dict[str, Any] = {"summary": {"IP": device["ip"], "Hostname": "", "Status": "Failed"},
-                                  "device_info": [], "switch_inventory": [], "interfaces": [], "arp": [], "mac": [], "cdp": [], "lldp": []}
+                                  "device_info": [], "inventory": [], "interfaces": [], "arp": [], "mac": [], "cdp": [], "lldp": []}
         connection = None
         try:
             connection = ConnectHandler(device_type=device["device_type"], ip=device["ip"], username=device["username"],
